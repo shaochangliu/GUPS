@@ -59,18 +59,18 @@ uint64_t hot_start = 0;
 uint64_t hotsize = 0;
 
 struct gups_args {
-  int tid;                      // thread id
+  int tid;                 // thread id
   uint64_t *indices;       // array of indices to access
-  void* field;                  // pointer to start of thread's region
+  void* field;             // pointer to start of thread's region
   uint64_t iters;          // iterations to perform
-  uint64_t size;           // size of region
-  uint64_t elt_size;       // size of elements
-  uint64_t hot_start;            // start of hot set
-  uint64_t hotsize;        // size of hot set
+  uint64_t size;           // number of elements
+  uint64_t elt_size;       // size of each element
+  uint64_t hot_start;      // start index of hot set, set to 0 for all threads
+  uint64_t hotsize;        // number of hot set elements
 };
 
 
-static inline uint64_t rdtscp(void)
+static inline uint64_t rdtscp(void)   //read the time stamp counter
 {
     uint32_t eax, edx;
     // why is "ecx" in clobber list here, anyway? -SG&MH,2017-10-05
@@ -84,7 +84,7 @@ static unsigned long updates, nelems;
 
 bool stop = false;
 
-static void *timing_thread()
+static void *timing_thread()    //timer, unit: second
 {
   uint64_t tic = -1;
   bool printed1 = false;
@@ -107,7 +107,7 @@ static void *timing_thread()
 
 uint64_t tot_updates = 0;
 
-static void *print_instantaneous_gups()
+static void *print_instantaneous_gups()   //print GUPS per second
 {
   FILE *tot;
   uint64_t tot_gups, tot_last_second_gups = 0;
@@ -123,7 +123,7 @@ static void *print_instantaneous_gups()
     for (int i = 0; i < threads; i++) {
       tot_gups += thread_gups[i];
     }
-    fprintf(tot, "%.10f\n", (1.0 * (abs(tot_gups - tot_last_second_gups))) / (1.0e9));
+    fprintf(tot, "GUPS: %.10f\n", (1.0 * (abs(tot_gups - tot_last_second_gups))) / (1.0e9));
     tot_updates += abs(tot_gups - tot_last_second_gups);
     tot_last_second_gups = tot_gups;
     sleep(1);
@@ -133,7 +133,7 @@ static void *print_instantaneous_gups()
 }
 
 
-static uint64_t lfsr_fast(uint64_t lfsr)
+static uint64_t lfsr_fast(uint64_t lfsr)  //emulate the random number generator?
 {
   lfsr ^= lfsr >> 7;
   lfsr ^= lfsr << 9;
@@ -149,10 +149,10 @@ static void *do_gups(void *arguments)
 {
   //printf("do_gups entered\n");
   struct gups_args *args = (struct gups_args*)arguments;
-  uint64_t *field = (uint64_t*)(args->field);
+  uint64_t *field = (uint64_t*)(args->field);   //pointer to the start of the thread's region
   uint64_t i;
   uint64_t index1, index2;
-  uint64_t elt_size = args->elt_size;
+  uint64_t elt_size = args->elt_size;   //size of elements
   char data[elt_size];
   uint64_t lfsr;
   uint64_t hot_num;
@@ -160,52 +160,52 @@ static void *do_gups(void *arguments)
   uint64_t start, end;
   uint64_t before_accesses = 0;
 
-  srand(args->tid);
+  srand(args->tid);   //use tid as the seed of random number generator
   lfsr = rand();
 
   index1 = 0;
   index2 = 0;
 
-  fprintf(hotsetfile, "Thread %d region: %p - %p\thot set: %p - %p\n", args->tid, field, field + (args->size * elt_size), field + args->hot_start, field + args->hot_start + (args->hotsize * elt_size));   
+  fprintf(hotsetfile, "Thread %d region: %p - %p\thot set: %p - %p\n", args->tid, field, field + (args->size * elt_size), field + args->hot_start * elt_size, field + (args->hot_start + args->hotsize) * elt_size);   
 
-  for (i = 0; i < args->iters; i++) {
+  for (i = 0; i < args->iters; i++) {   //every iteration represents an memory access
     hot_num = lfsr_fast(lfsr) % 100;
-    if (hot_num < 90) {
+
+    if (hot_num < 90) {   //90% of the time, access hot set
       lfsr = lfsr_fast(lfsr);
-      index1 = args->hot_start + (lfsr % args->hotsize);
-      if (move_hotset1) {
+      index1 = args->hot_start + (lfsr % args->hotsize);  //hot element index
+      
+      if (move_hotset1) {   //150s-300s
         if ((index1 < (args->hotsize / 4))) {
-          index1 += args->hotsize;
+          index1 += args->hotsize;    //if the hot index is in the first 1/4 of the hot set, access cold set
+        }
+      } else {    //0s-150s
+        if ((index1 < (args->hotsize / 4))) {
+          before_accesses++;    //if the hot index is in the first 1/4 of the hot set, count the number of accesses
         }
       }
-      else {
-        if ((index1 < (args->hotsize / 4))) {
-          before_accesses++;
-        }
-      }
-      start = rdtscp();
-      if (elt_size == 8) {
+
+      start = rdtscp();   //count the clock cycles this access takes
+      if (elt_size == 8) {    //each access include one read, one write
         uint64_t  tmp = field[index1];
         tmp = tmp + i;
         field[index1] = tmp;
-      }
-      else {
+      } else {    //if data size is not 8 bytes, use memcpy to access memory
         memcpy(data, &field[index1 * elt_size], elt_size);
         memset(data, data[0] + i, elt_size);
         memcpy(&field[index1 * elt_size], data, elt_size);
       }
       end = rdtscp();
-    }
-    else {
+    } else {      //10% of the time, don't care whether the element is hot or cold
       lfsr = lfsr_fast(lfsr);
       index2 = lfsr % (args->size);
+
       start = rdtscp();
       if (elt_size == 8) {
         uint64_t tmp = field[index2];
         tmp = tmp + i;
         field[index2] = tmp;
-      }
-      else {
+      } else {
         memcpy(data, &field[index2 * elt_size], elt_size);
         memset(data, data[0] + i, elt_size);
         memcpy(&field[index2 * elt_size], data, elt_size);
@@ -214,17 +214,15 @@ static void *do_gups(void *arguments)
     }
 
     if (i % 10000 == 0) {
-      thread_gups[args->tid] += 10000;
+      thread_gups[args->tid] += 10000;  //count the number of iterations (GUPS ops)
     }
 
-    if (stop) {
+    if (stop) {   //stop GUPS if >=250s
       break;
     }
   }
 
-  fprintf(stderr, "before_accesses: %lu\n", before_accesses);
-
-  //fclose(timefile);
+  fprintf(stderr, "Thread %d before_accesses: %lu\n", args->tid, before_accesses);
   return 0;
 }
 
@@ -258,29 +256,26 @@ int main(int argc, char **argv)
   ga = (struct gups_args**)malloc(threads * sizeof(struct gups_args*));
 
   updates = atol(argv[2]);
-  updates -= updates % 256;
+  updates -= updates % 256;    //updates per thread, multiple of 256
   expt = atoi(argv[3]);
   assert(expt > 8);
   assert(updates > 0 && (updates % 256 == 0));
   size = (unsigned long)(1) << expt;
-  size -= (size % 256);
+  size -= (size % 256);       //size of region, multiple of 256
   assert(size > 0 && (size % 256 == 0));
-  elt_size = atoi(argv[4]);
+  elt_size = atoi(argv[4]);   //size of each element
   log_hot_size = atof(argv[5]);
-  tot_hot_size = (unsigned long)(1) << log_hot_size;
+  tot_hot_size = (unsigned long)(1) << log_hot_size;    //size of hot set
 
   fprintf(stderr, "%lu updates per thread (%d threads)\n", updates, threads);
   fprintf(stderr, "field of 2^%lu (%lu) bytes\n", expt, size);
   fprintf(stderr, "%ld byte element size (%ld elements total)\n", elt_size, size / elt_size);
 
-  p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS | MAP_HUGETLB | MAP_POPULATE, -1, 0);
+  p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
   if (p == MAP_FAILED) {
     perror("mmap");
     assert(0);
   }
-
-  gettimeofday(&stoptime, NULL);
-  fprintf(stderr, "Init took %.4f seconds\n", elapsed(&starttime, &stoptime));
   fprintf(stderr, "Region address: %p - %p\t size: %ld\n", p, (p + size), size);
   
   nelems = (size / threads) / elt_size; // number of elements per thread
@@ -294,19 +289,12 @@ int main(int argc, char **argv)
     assert(0);
   }
 
-  gettimeofday(&stoptime, NULL);
-  secs = elapsed(&starttime, &stoptime);
-  fprintf(stderr, "Initialization time: %.4f seconds.\n", secs);
-
   //hemem_start_timing();
 
   hot_start = 0;
-  hotsize = (tot_hot_size / threads) / elt_size;
-  //printf("hot_start: %p\thot_end: %p\thot_size: %lu\n", p + hot_start, p + hot_start + (hotsize * elt_size), hotsize);
+  hotsize = (tot_hot_size / threads) / elt_size;    //size of hot set per thread
 
-  gettimeofday(&starttime, NULL);
-  for (i = 0; i < threads; i++) {
-    //printf("starting thread [%d]\n", i);
+  for (i = 0; i < threads; i++) {   //specify parameters for each thread
     ga[i] = (struct gups_args*)malloc(sizeof(struct gups_args));
     ga[i]->tid = i;
     ga[i]->field = p + (i * nelems * elt_size);
@@ -317,7 +305,14 @@ int main(int argc, char **argv)
     ga[i]->hotsize = hotsize;
   }
 
+  gettimeofday(&stoptime, NULL);
+  secs = elapsed(&starttime, &stoptime);
+  fprintf(stderr, "Initialization time: %.4f seconds.\n", secs);
+
+  gettimeofday(&starttime, NULL);
+  
   // run through gups once to touch all memory
+  // lsc: actually, not all the memory is touched, as GUPS itself performs random accesses
   // spawn gups worker threads
   for (i = 0; i < threads; i++) {
     int r = pthread_create(&t[i], NULL, do_gups, (void*)ga[i]);
@@ -334,14 +329,15 @@ int main(int argc, char **argv)
   gettimeofday(&stoptime, NULL);
 
   secs = elapsed(&starttime, &stoptime);
-  //printf("Elapsed time: %.4f seconds.\n", secs);
+  printf("Memory warm-up time: %.4f seconds.\n", secs);
   gups = threads * ((double)updates) / (secs * 1.0e9);
-  //printf("GUPS = %.10f\n", gups);
+  printf("GUPS = %.10f\n", gups);
+
   memset(thread_gups, 0, sizeof(thread_gups));
 
-  filename = "indices2.txt";
+  // filename = "indices2.txt";
 
-  pthread_t print_thread;
+  pthread_t print_thread;   //print GUPS per second
   int pt = pthread_create(&print_thread, NULL, print_instantaneous_gups, NULL);
   assert(pt == 0);
 
@@ -356,7 +352,7 @@ int main(int argc, char **argv)
   //hemem_clear_stats();
   // spawn gups worker threads
   for (i = 0; i < threads; i++) {
-    ga[i]->iters = updates * 2;
+    ga[i]->iters = updates * 2;   //lsc: why 2x updates?
     int r = pthread_create(&t[i], NULL, do_gups, (void*)ga[i]);
     assert(r == 0);
   }
@@ -366,16 +362,20 @@ int main(int argc, char **argv)
     int r = pthread_join(t[i], NULL);
     assert(r == 0);
   }
+
   gettimeofday(&stoptime, NULL);
   //hemem_print_stats();
   //hemem_clear_stats();
 
-  secs = elapsed(&starttime, &stoptime);
-  printf("Elapsed time: %.4f seconds.\n", secs);
-  gups = ((double)tot_updates) / (secs * 1.0e9);
-  printf("GUPS = %.10f\n", gups);
+  if (stop) {
+    printf("Benchmark stopped by timer thread because it ran for more than 250s\n");
+  }
 
   memset(thread_gups, 0, sizeof(thread_gups));
+  secs = elapsed(&starttime, &stoptime);
+  printf("Elapsed time for real benchmark: %.4f seconds.\n", secs);
+  gups = ((double)tot_updates) / (secs * 1.0e9);
+  printf("GUPS = %.10f\n", gups);
 
 #if 0
 #ifdef HOTSPOT
@@ -410,14 +410,12 @@ int main(int argc, char **argv)
 
   //hemem_stop_timing();
 
+  // free resources
   for (i = 0; i < threads; i++) {
     //free(ga[i]->indices);
     free(ga[i]);
   }
   free(ga);
-
-  //getchar();
-
   munmap(p, size);
 
   return 0;

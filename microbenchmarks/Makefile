@@ -21,7 +21,8 @@ gups-pebs: gups.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o gups-pebs gups.o zipf.o $(LIBS) -L../src/ -lhemem
 
 gups-hotset-move: gups-hotset-move.o
-	$(CC) $(CFLAGS) $(INCLUDES) -o gups-hotset-move gups-hotset-move.o zipf.o $(LIBS) -L../src/ -lhemem
+	$(CC) $(CFLAGS) $(INCLUDES) -o gups-hotset-move gups-hotset-move.o zipf.o ../src/timer.o $(LIBS)
+# -L../src/ -lhemem
 
 gups-simple: gups.o
 	$(CC) $(CFLAGS) $(INCLUDES) -o gups-simple gups.o zipf.o $(LIBS) -L../src/ -lhemem-simple
