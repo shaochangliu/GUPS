@@ -1,21 +1,3 @@
-/*
- * =====================================================================================
- *
- *       Filename:  gups.c
- *
- *    Description:
- *
- *        Version:  1.0
- *        Created:  02/21/2018 02:36:27 PM
- *       Revision:  none
- *       Compiler:  gcc
- *
- *         Author:  YOUR NAME (),
- *   Organization:
- *
- * =====================================================================================
- */
-
 #define _GNU_SOURCE
 
 #include <stdlib.h>
@@ -110,8 +92,7 @@ uint64_t tot_updates = 0;
 static void *print_instantaneous_gups()   //print GUPS per second
 {
   FILE *tot;
-  uint64_t tot_gups, tot_last_second_gups = 0;
-
+  uint64_t tot_gups;
 
   tot = fopen("tot_gups.txt", "w");
   if (tot == NULL) {
@@ -123,10 +104,9 @@ static void *print_instantaneous_gups()   //print GUPS per second
     for (int i = 0; i < threads; i++) {
       tot_gups += thread_gups[i];
     }
-    fprintf(tot, "GUPS: %.10f\n", (1.0 * (abs(tot_gups - tot_last_second_gups))) / (1.0e9));
-    tot_updates += abs(tot_gups - tot_last_second_gups);
-    tot_last_second_gups = tot_gups;
-    sleep(1);
+    fprintf(tot, "GUPS in last second: %.10f\n", (1.0 * (abs(tot_gups - tot_updates))) / (1.0e9));
+    tot_updates = tot_gups;
+    sleep(1);   //may not be accurate if the execution time isn't much bigger than 1s
   }
 
   return NULL;
@@ -168,13 +148,14 @@ static void *do_gups(void *arguments)
 
   fprintf(hotsetfile, "Thread %d region: %p - %p\thot set: %p - %p\n", args->tid, field, field + (args->size * elt_size), field + args->hot_start * elt_size, field + (args->hot_start + args->hotsize) * elt_size);   
 
-  for (i = 0; i < args->iters; i++) {   //every iteration represents an memory access
+  for (i = 0; i < args->iters; i++) {   //every iteration is an memory access
     hot_num = lfsr_fast(lfsr) % 100;
 
     if (hot_num < 90) {   //90% of the time, access hot set
       lfsr = lfsr_fast(lfsr);
       index1 = args->hot_start + (lfsr % args->hotsize);  //hot element index
       
+      /*
       if (move_hotset1) {   //150s-300s
         if ((index1 < (args->hotsize / 4))) {
           index1 += args->hotsize;    //if the hot index is in the first 1/4 of the hot set, access cold set
@@ -184,8 +165,9 @@ static void *do_gups(void *arguments)
           before_accesses++;    //if the hot index is in the first 1/4 of the hot set, count the number of accesses
         }
       }
+       */
 
-      start = rdtscp();   //count the clock cycles this access takes
+      //start = rdtscp();   //count the clock cycles this access takes
       if (elt_size == 8) {    //each access include one read, one write
         uint64_t  tmp = field[index1];
         tmp = tmp + i;
@@ -195,12 +177,12 @@ static void *do_gups(void *arguments)
         memset(data, data[0] + i, elt_size);
         memcpy(&field[index1 * elt_size], data, elt_size);
       }
-      end = rdtscp();
+      //end = rdtscp();
     } else {      //10% of the time, don't care whether the element is hot or cold
       lfsr = lfsr_fast(lfsr);
       index2 = lfsr % (args->size);
 
-      start = rdtscp();
+      //start = rdtscp();
       if (elt_size == 8) {
         uint64_t tmp = field[index2];
         tmp = tmp + i;
@@ -210,19 +192,22 @@ static void *do_gups(void *arguments)
         memset(data, data[0] + i, elt_size);
         memcpy(&field[index2 * elt_size], data, elt_size);
       }
-      end = rdtscp();
+      //end = rdtscp();
     }
 
     if (i % 10000 == 0) {
       thread_gups[args->tid] += 10000;  //count the number of iterations (GUPS ops)
     }
 
-    if (stop) {   //stop GUPS if >=250s
+    /*
+        if (stop) {   //stop GUPS if >=250s
       break;
     }
+    */
+
   }
 
-  fprintf(stderr, "Thread %d before_accesses: %lu\n", args->tid, before_accesses);
+  //fprintf(stderr, "Thread %d before_accesses: %lu\n", args->tid, before_accesses);
   return 0;
 }
 
@@ -240,7 +225,7 @@ int main(int argc, char **argv)
   pthread_t t[MAX_THREADS];
 
   if (argc != 6) {
-    fprintf(stderr, "Usage: %s [threads] [updates per thread] [exponent] [data size (bytes)] [noremap/remap]\n", argv[0]);
+    fprintf(stderr, "Usage: %s [threads] [updates per thread] [exponent of region] [data size (bytes)] [exponent of hot set]\n", argv[0]);
     fprintf(stderr, "  threads\t\t\tnumber of threads to launch\n");
     fprintf(stderr, "  updates per thread\t\tnumber of updates per thread\n");
     fprintf(stderr, "  exponent\t\t\tlog size of region\n");
@@ -249,7 +234,7 @@ int main(int argc, char **argv)
     return 0;
   }
 
-  gettimeofday(&starttime, NULL);
+  gettimeofday(&starttime, NULL);   //start initialization
 
   threads = atoi(argv[1]);
   assert(threads <= MAX_THREADS);
@@ -257,12 +242,14 @@ int main(int argc, char **argv)
 
   updates = atol(argv[2]);
   updates -= updates % 256;    //updates per thread, multiple of 256
+  assert(updates > 0 && (updates % 256 == 0));
+
   expt = atoi(argv[3]);
   assert(expt > 8);
-  assert(updates > 0 && (updates % 256 == 0));
   size = (unsigned long)(1) << expt;
   size -= (size % 256);       //size of region, multiple of 256
   assert(size > 0 && (size % 256 == 0));
+
   elt_size = atoi(argv[4]);   //size of each element
   log_hot_size = atof(argv[5]);
   tot_hot_size = (unsigned long)(1) << log_hot_size;    //size of hot set
@@ -305,7 +292,7 @@ int main(int argc, char **argv)
     ga[i]->hotsize = hotsize;
   }
 
-  gettimeofday(&stoptime, NULL);
+  gettimeofday(&stoptime, NULL);    //end initialization
   secs = elapsed(&starttime, &stoptime);
   fprintf(stderr, "Initialization time: %.4f seconds.\n", secs);
 
@@ -341,18 +328,19 @@ int main(int argc, char **argv)
   int pt = pthread_create(&print_thread, NULL, print_instantaneous_gups, NULL);
   assert(pt == 0);
 
-
+  /*
   pthread_t timer_thread;
   int tt = pthread_create(&timer_thread, NULL, timing_thread, NULL);
   assert (tt == 0);
+  */
 
-  fprintf(stderr, "Timing.\n");
+  fprintf(stderr, "Start timing.\n");
   gettimeofday(&starttime, NULL);
 
   //hemem_clear_stats();
   // spawn gups worker threads
   for (i = 0; i < threads; i++) {
-    ga[i]->iters = updates * 2;   //lsc: why 2x updates?
+    //ga[i]->iters = updates * 2;   //lsc: why 2x updates?
     int r = pthread_create(&t[i], NULL, do_gups, (void*)ga[i]);
     assert(r == 0);
   }
@@ -367,15 +355,19 @@ int main(int argc, char **argv)
   //hemem_print_stats();
   //hemem_clear_stats();
 
+  /*
   if (stop) {
     printf("Benchmark stopped by timer thread because it ran for more than 250s\n");
   }
+  */
 
-  memset(thread_gups, 0, sizeof(thread_gups));
   secs = elapsed(&starttime, &stoptime);
   printf("Elapsed time for real benchmark: %.4f seconds.\n", secs);
-  gups = ((double)tot_updates) / (secs * 1.0e9);
+  //gups = ((double)tot_updates) / (secs * 1.0e9);
+  gups = threads * ((double)updates) / (secs * 1.0e9);
   printf("GUPS = %.10f\n", gups);
+
+  memset(thread_gups, 0, sizeof(thread_gups));
 
 #if 0
 #ifdef HOTSPOT
