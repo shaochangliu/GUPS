@@ -146,7 +146,7 @@ static void *do_gups(void *arguments)
   index1 = 0;
   index2 = 0;
 
-  fprintf(hotsetfile, "Thread %d region: %p - %p\thot set: %p - %p\n", args->tid, field, field + (args->size * elt_size), field + args->hot_start * elt_size, field + (args->hot_start + args->hotsize) * elt_size);   
+  fprintf(hotsetfile, "Thread %d region: %p - %p\thot set: %p - %p\n", args->tid, field, field + args->size, field + args->hot_start, field + args->hot_start + args->hotsize);   
 
   for (i = 0; i < args->iters; i++) {   //every iteration is an memory access
     hot_num = lfsr_fast(lfsr) % 100;
