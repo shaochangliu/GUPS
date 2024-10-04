@@ -19,8 +19,9 @@
 #include "../src/timer.h"
 #include "../src/hemem.h"
 
-
 #include "gups.h"
+
+#define PROC_PATH "/proc/swap_log_control"
 
 #define MAX_THREADS     64
 
@@ -296,6 +297,13 @@ int main(int argc, char **argv)
   secs = elapsed(&starttime, &stoptime);
   fprintf(stderr, "Initialization time: %.4f seconds.\n", secs);
 
+  // swap log control
+  int fd_swap_log = open(PROC_PATH, O_RDWR);
+  if (fd_swap_log < 0) {
+    perror("Failed to open the proc file...");
+    return errno;
+  }
+
   gettimeofday(&starttime, NULL);
   
   // run through gups once to touch all memory
@@ -334,6 +342,11 @@ int main(int argc, char **argv)
   assert (tt == 0);
   */
 
+  // enable swap log
+  if (write(fd_swap_log, "1", 1) < 0) {
+    perror("Failed to enable swap log");
+  }
+
   fprintf(stderr, "Start timing.\n");
   gettimeofday(&starttime, NULL);
 
@@ -354,6 +367,22 @@ int main(int argc, char **argv)
   gettimeofday(&stoptime, NULL);
   //hemem_print_stats();
   //hemem_clear_stats();
+
+  // read swap log status
+  char buffer[512];
+  if (read(fd_swap_log, buffer, sizeof(buffer)) < 0) {
+    perror("Failed to read from proc file");
+  } else {
+    printf("%s", buffer);
+  }
+
+  // disable swap log
+  if (write(fd_swap_log, "0", 1) < 0) {
+    perror("Failed to disable swap log");
+  }
+
+  // swap log control
+  close(fd_swap_log);
 
   /*
   if (stop) {
