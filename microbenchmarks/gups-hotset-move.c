@@ -5,7 +5,6 @@
 #include <assert.h>
 #include <unistd.h>
 #include <sys/time.h>
-#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <math.h>
@@ -15,13 +14,13 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/syscall.h>
 
 #include "../src/timer.h"
-#include "../src/hemem.h"
 
 #include "gups.h"
 
-#define PROC_PATH "/proc/swap_log_control"
+#define PROC_PATH "/proc/swap_log_ctl"
 
 #define MAX_THREADS     64
 
@@ -42,7 +41,7 @@ uint64_t hot_start = 0;
 uint64_t hotsize = 0;
 
 struct gups_args {
-  int tid;                 // thread id
+  int tid;                 // thread id (0 to threads-1)
   uint64_t *indices;       // array of indices to access
   void* field;             // pointer to start of thread's region
   uint64_t iters;          // iterations to perform
@@ -50,6 +49,7 @@ struct gups_args {
   uint64_t elt_size;       // size of each element
   uint64_t hot_start;      // start index of hot set, set to 0 for all threads
   uint64_t hotsize;        // number of hot set elements
+  bool exec_stage;         // execution stage or not
 };
 
 
@@ -122,8 +122,6 @@ static uint64_t lfsr_fast(uint64_t lfsr)  //emulate the random number generator?
   return lfsr;
 }
 
-char *filename = "indices1.txt";
-
 FILE *hotsetfile = NULL;
 
 static void *do_gups(void *arguments)
@@ -139,7 +137,6 @@ static void *do_gups(void *arguments)
   uint64_t hot_num;
   uint64_t tmp;
   uint64_t start, end;
-  uint64_t before_accesses = 0;
 
   srand(args->tid);   //use tid as the seed of random number generator
   lfsr = rand();
@@ -155,18 +152,6 @@ static void *do_gups(void *arguments)
     if (hot_num < 90) {   //90% of the time, access hot set
       lfsr = lfsr_fast(lfsr);
       index1 = args->hot_start + (lfsr % args->hotsize);  //hot element index
-      
-      /*
-      if (move_hotset1) {   //150s-300s
-        if ((index1 < (args->hotsize / 4))) {
-          index1 += args->hotsize;    //if the hot index is in the first 1/4 of the hot set, access cold set
-        }
-      } else {    //0s-150s
-        if ((index1 < (args->hotsize / 4))) {
-          before_accesses++;    //if the hot index is in the first 1/4 of the hot set, count the number of accesses
-        }
-      }
-       */
 
       //start = rdtscp();   //count the clock cycles this access takes
       if (elt_size == 8) {    //each access include one read, one write
@@ -199,16 +184,16 @@ static void *do_gups(void *arguments)
     if (i % 10000 == 0) {
       thread_gups[args->tid] += 10000;  //count the number of iterations (GUPS ops)
     }
-
-    /*
-        if (stop) {   //stop GUPS if >=250s
-      break;
-    }
-    */
-
   }
 
-  //fprintf(stderr, "Thread %d before_accesses: %lu\n", args->tid, before_accesses);
+  if (args->exec_stage) {
+    pid_t pid = getpid();
+    pid_t tid = syscall(SYS_gettid);
+    char command[256];
+    snprintf(command, sizeof(command), "cat /proc/%d/task/%d/page_reclaim_breakdown >> gups_tid_%d.log", pid, tid, args->tid);
+    system(command);
+  }
+
   return 0;
 }
 
@@ -276,9 +261,7 @@ int main(int argc, char **argv)
     perror("fopen");
     assert(0);
   }
-
-  //hemem_start_timing();
-
+  
   hot_start = 0;
   hotsize = (tot_hot_size / threads) / elt_size;    //size of hot set per thread
 
@@ -291,18 +274,14 @@ int main(int argc, char **argv)
     ga[i]->elt_size = elt_size;
     ga[i]->hot_start = 0;        // hot set at start of thread's region
     ga[i]->hotsize = hotsize;
+    ga[i]->exec_stage = false;
   }
 
   gettimeofday(&stoptime, NULL);    //end initialization
   secs = elapsed(&starttime, &stoptime);
   fprintf(stderr, "Initialization time: %.4f seconds.\n", secs);
-
-  // swap log control
-  int fd_swap_log = open(PROC_PATH, O_RDWR);
-  if (fd_swap_log < 0) {
-    perror("Failed to open the proc file...");
-    return errno;
-  }
+  fprintf(stderr, "swap space usage after initialization: ");
+  system("cat /sys/fs/cgroup/swap_log/memory.swap.current");
 
   gettimeofday(&starttime, NULL);
   
@@ -319,7 +298,6 @@ int main(int argc, char **argv)
     int r = pthread_join(t[i], NULL);
     assert(r == 0);
   }
-  //hemem_print_stats();
 
   gettimeofday(&stoptime, NULL);
 
@@ -327,30 +305,25 @@ int main(int argc, char **argv)
   printf("Memory warm-up time: %.4f seconds.\n", secs);
   gups = threads * ((double)updates) / (secs * 1.0e9);
   printf("GUPS = %.10f\n", gups);
+  fprintf(stderr, "swap space usage after warm-up: ");
+  system("cat /sys/fs/cgroup/swap_log/memory.swap.current");
 
   memset(thread_gups, 0, sizeof(thread_gups));
 
-  // filename = "indices2.txt";
+  for (i = 0; i < threads; i++) {
+    ga[i]->exec_stage = true;
+  }
 
   pthread_t print_thread;   //print GUPS per second
   int pt = pthread_create(&print_thread, NULL, print_instantaneous_gups, NULL);
   assert(pt == 0);
 
-  /*
-  pthread_t timer_thread;
-  int tt = pthread_create(&timer_thread, NULL, timing_thread, NULL);
-  assert (tt == 0);
-  */
-
   // enable swap log
-  if (write(fd_swap_log, "1", 1) < 0) {
-    perror("Failed to enable swap log");
-  }
+  system("echo 1 > /proc/swap_log_ctl");
 
   fprintf(stderr, "Start timing.\n");
   gettimeofday(&starttime, NULL);
 
-  //hemem_clear_stats();
   // spawn gups worker threads
   for (i = 0; i < threads; i++) {
     //ga[i]->iters = updates * 2;   //lsc: why 2x updates?
@@ -365,30 +338,12 @@ int main(int argc, char **argv)
   }
 
   gettimeofday(&stoptime, NULL);
-  //hemem_print_stats();
-  //hemem_clear_stats();
 
   // read swap log status
-  char buffer[512];
-  if (read(fd_swap_log, buffer, sizeof(buffer)) < 0) {
-    perror("Failed to read from proc file");
-  } else {
-    printf("%s", buffer);
-  }
+  system("cat /proc/swap_log_ctl");
 
   // disable swap log
-  if (write(fd_swap_log, "0", 1) < 0) {
-    perror("Failed to disable swap log");
-  }
-
-  // swap log control
-  close(fd_swap_log);
-
-  /*
-  if (stop) {
-    printf("Benchmark stopped by timer thread because it ran for more than 250s\n");
-  }
-  */
+  system("echo 0 > /proc/swap_log_ctl");
 
   secs = elapsed(&starttime, &stoptime);
   printf("Elapsed time for real benchmark: %.4f seconds.\n", secs);
@@ -397,39 +352,6 @@ int main(int argc, char **argv)
   printf("GUPS = %.10f\n", gups);
 
   memset(thread_gups, 0, sizeof(thread_gups));
-
-#if 0
-#ifdef HOTSPOT
-  filename = "indices3.txt";
-  move_hotset = true;
-
-  printf("Timing.\n");
-  gettimeofday(&starttime, NULL);
-
-  // spawn gups worker threads
-  for (i = 0; i < threads; i++) {
-    int r = pthread_create(&t[i], NULL, do_gups, (void*)ga[i]);
-    assert(r == 0);
-  }
-
-  // wait for worker threads
-  for (i = 0; i < threads; i++) {
-    int r = pthread_join(t[i], NULL);
-    assert(r == 0);
-  }
-
-  gettimeofday(&stoptime, NULL);
-
-  secs = elapsed(&starttime, &stoptime);
-  printf("Elapsed time: %.4f seconds.\n", secs);
-  gups = threads * ((double)updates) / (secs * 1.0e9);
-  printf("GUPS = %.10f\n", gups);
-
-  //hemem_print_stats();
-#endif
-#endif
-
-  //hemem_stop_timing();
 
   // free resources
   for (i = 0; i < threads; i++) {
