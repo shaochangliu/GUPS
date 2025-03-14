@@ -24,15 +24,6 @@
 
 #define MAX_THREADS     64
 
-#define GUPS_PAGE_SIZE      (4 * 1024)
-#define PAGE_NUM            3
-#define PAGES               2048
-
-#ifdef HOTSPOT
-extern uint64_t hotset_start;
-extern double hotset_fraction;
-#endif
-
 int threads;
 
 bool move_hotset1 = false;
@@ -186,7 +177,7 @@ static void *do_gups(void *arguments)
     }
   }
 
-  if (args->exec_stage) {
+  if (args->exec_stage) { // statistics from warm-up phase are automatically cleared by pthread_join
     pid_t pid = getpid();
     pid_t tid = syscall(SYS_gettid);
     char command[256];
@@ -256,7 +247,7 @@ int main(int argc, char **argv)
 
   memset(thread_gups, 0, sizeof(thread_gups));
 
-  hotsetfile = fopen("hotsets.txt", "w");
+  hotsetfile = fopen("hotsets.txt", "a");
   if (hotsetfile == NULL) {
     perror("fopen");
     assert(0);
@@ -280,8 +271,6 @@ int main(int argc, char **argv)
   gettimeofday(&stoptime, NULL);    //end initialization
   secs = elapsed(&starttime, &stoptime);
   fprintf(stderr, "Initialization time: %.4f seconds.\n", secs);
-  fprintf(stderr, "swap space usage after initialization: ");
-  system("cat /sys/fs/cgroup/swap_log/memory.swap.current");
 
   gettimeofday(&starttime, NULL);
   
@@ -310,16 +299,18 @@ int main(int argc, char **argv)
 
   memset(thread_gups, 0, sizeof(thread_gups));
 
+  /*
+  pthread_t print_thread;   //print GUPS per second
+  int pt = pthread_create(&print_thread, NULL, print_instantaneous_gups, NULL);
+  assert(pt == 0);
+  */
+
   for (i = 0; i < threads; i++) {
     ga[i]->exec_stage = true;
   }
 
-  pthread_t print_thread;   //print GUPS per second
-  int pt = pthread_create(&print_thread, NULL, print_instantaneous_gups, NULL);
-  assert(pt == 0);
-
-  // enable swap log
-  system("echo 1 > /proc/swap_log_ctl");
+  // start writing swap log
+  system("echo 2 > /proc/swap_log_ctl");
 
   fprintf(stderr, "Start timing.\n");
   gettimeofday(&starttime, NULL);
@@ -338,12 +329,6 @@ int main(int argc, char **argv)
   }
 
   gettimeofday(&stoptime, NULL);
-
-  // read swap log status
-  system("cat /proc/swap_log_ctl");
-
-  // disable swap log
-  system("echo 0 > /proc/swap_log_ctl");
 
   secs = elapsed(&starttime, &stoptime);
   printf("Elapsed time for real benchmark: %.4f seconds.\n", secs);

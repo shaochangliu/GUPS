@@ -23,3 +23,6 @@ logs/
 results/
 scripts/
 *tags
+
+*.log
+*.out
